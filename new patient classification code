@@ -1,0 +1,136 @@
+import pandas as pd
+import numpy as np
+import pickle
+from tensorflow import keras
+from tensorflow.keras import layers, Model
+from google.colab import files
+
+print("="*80)
+print("🏥 COMPLETE PATIENT CLASSIFICATION")
+print("="*80)
+
+# ============================================================
+# STEP 1: BUILD MODEL ARCHITECTURE
+# ============================================================
+print("\n[1/5] Building model...")
+
+def build_gru_gcn_model(num_features):
+    inputs = keras.Input(shape=(num_features,))
+    x = layers.Reshape((num_features, 1))(inputs)
+
+    gru_out = layers.Bidirectional(layers.GRU(64, return_sequences=True, dropout=0.3))(x)
+    gru_out = layers.Bidirectional(layers.GRU(32, return_sequences=False, dropout=0.3))(gru_out)
+
+    graph_in = layers.Dense(64, activation='relu')(gru_out)
+    graph_layer1 = layers.Dense(64, activation='relu')(graph_in)
+    graph_layer2 = layers.Dense(32, activation='relu')(graph_layer1)
+    graph_out = layers.Add()([graph_layer1[:, :32], graph_layer2])
+
+    attention_weights = layers.Dense(num_features, activation='softmax')(graph_out)
+    attended_features = layers.Multiply()([inputs, attention_weights])
+
+    combined = layers.Concatenate()([graph_out, attended_features])
+    dense1 = layers.Dense(128, activation='relu')(combined)
+    dense1 = layers.Dropout(0.4)(dense1)
+    dense2 = layers.Dense(64, activation='relu')(dense1)
+    dense2 = layers.Dropout(0.3)(dense2)
+
+    classification_output = layers.Dense(1, activation='sigmoid', name='classification')(dense2)
+    abnormality_output = layers.Dense(num_features, activation='sigmoid', name='joint_abnormality')(attended_features)
+
+    return Model(inputs=inputs, outputs=[classification_output, abnormality_output])
+
+model = build_gru_gcn_model(42)
+model.load_weights('gru_gcn_gait_model.h5')
+print("✓ Model loaded")
+
+# ============================================================
+# STEP 2: LOAD SCALER
+# ============================================================
+print("\n[2/5] Loading scaler...")
+
+with open('scaler.pkl', 'rb') as f:
+    scaler = pickle.load(f)
+with open('feature_names.pkl', 'rb') as f:
+    feature_names = pickle.load(f)
+
+print("✓ Scaler loaded")
+
+# ============================================================
+# STEP 3: UPLOAD FILE
+# ============================================================
+print("\n[3/5] Upload patient file...")
+
+uploaded = files.upload()
+filename = list(uploaded.keys())[0]
+df = pd.read_excel(filename)
+
+print(f"✓ {filename}: {df.shape[0]} rows, {df.shape[1]} cols")
+
+# ============================================================
+# STEP 4: PREPARE DATA
+# ============================================================
+print("\n[4/5] Preparing data...")
+
+matching_features = [f for f in feature_names if f in df.columns]
+print(f"  Matching: {len(matching_features)}/42 features")
+
+X_partial = df[matching_features].values
+X_full = np.zeros((len(df), 42))
+
+for i, feature in enumerate(feature_names):
+    if feature in matching_features:
+        col_idx = matching_features.index(feature)
+        X_full[:, i] = X_partial[:, col_idx]
+
+X_norm = scaler.transform(X_full)
+print(f"✓ Data prepared: {X_norm.shape}")
+
+# ============================================================
+# STEP 5: PREDICT
+# ============================================================
+print("\n[5/5] Predicting...")
+
+probs, abnormality = model.predict(X_norm, verbose=0)
+avg_prob = probs.mean()
+avg_abnormality = abnormality.mean(axis=0)
+
+print(f"✓ Complete")
+
+# ============================================================
+# RESULTS
+# ============================================================
+print("\n" + "="*80)
+print("RESULTS")
+print("="*80)
+
+print(f"\nRaw probability: {avg_prob:.4f}")
+
+# INVERTED LOGIC
+if avg_prob < 0.5:
+    status = "🔴 STROKE"
+    confidence = (1 - avg_prob) * 100
+    is_stroke = True
+else:
+    status = "🟢 HEALTHY"
+    confidence = avg_prob * 100
+    is_stroke = False
+
+print(f"\n{status}")
+print(f"Confidence: {confidence:.2f}%")
+
+if is_stroke:
+    print("\n⚠️  TOP 5 AFFECTED JOINTS:")
+    measured_scores = [(f, avg_abnormality[i]) for i, f in enumerate(feature_names) if f in matching_features]
+    measured_scores.sort(key=lambda x: x[1], reverse=True)
+
+    for rank, (feat, score) in enumerate(measured_scores[:5], 1):
+        if score > 0.6:
+            sev = "🔴 HIGHLY ABNORMAL"
+        elif score > 0.4:
+            sev = "🟡 MILDLY ABNORMAL"
+        else:
+            sev = "🟢 NORMAL"
+        print(f"  {rank}. {feat:30s} {score:.4f} {sev}")
+
+print("\n" + "="*80)
