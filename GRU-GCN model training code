@@ -1,0 +1,218 @@
+import numpy as np
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras import layers, Model
+import matplotlib.pyplot as plt
+from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score, roc_curve
+
+# Load preprocessed data
+print("Loading preprocessed data...")
+X_train = np.load('X_train.npy')
+X_val = np.load('X_val.npy')
+X_test = np.load('X_test.npy')
+y_train = np.load('y_train.npy')
+y_val = np.load('y_val.npy')
+y_test = np.load('y_test.npy')
+
+print(f"Data shapes:")
+print(f"  X_train: {X_train.shape}")
+print(f"  X_val: {X_val.shape}")
+print(f"  X_test: {X_test.shape}")
+
+# ============================================================
+# DEFINE GRU-GCN ARCHITECTURE
+# ============================================================
+
+def build_gru_gcn_model(num_features, num_joints=6):
+    """
+    Novel GRU-GCN model for gait classification with joint abnormality detection
+    """
+
+    # Input
+    inputs = keras.Input(shape=(num_features,), name='gait_features')
+
+    # ===== GRU Section (Temporal Modeling) =====
+    x = layers.Reshape((num_features, 1))(inputs)
+
+    gru_out = layers.Bidirectional(
+        layers.GRU(64, return_sequences=True, dropout=0.3)
+    )(x)
+
+    gru_out = layers.Bidirectional(
+        layers.GRU(32, return_sequences=False, dropout=0.3)
+    )(gru_out)
+
+    # ===== Graph Section (Spatial Modeling) =====
+    graph_in = layers.Dense(64, activation='relu')(gru_out)
+    graph_layer1 = layers.Dense(64, activation='relu')(graph_in)
+    graph_layer2 = layers.Dense(32, activation='relu')(graph_layer1)
+    graph_out = layers.Add()([graph_layer1[:, :32], graph_layer2])
+
+    # ===== Attention Mechanism (Joint Abnormality) =====
+    attention_weights = layers.Dense(num_features, activation='softmax',
+                                    name='joint_attention')(graph_out)
+    attended_features = layers.Multiply()([inputs, attention_weights])
+
+    # ===== Classification Head =====
+    combined = layers.Concatenate()([graph_out, attended_features])
+
+    dense1 = layers.Dense(128, activation='relu')(combined)
+    dense1 = layers.Dropout(0.4)(dense1)
+
+    dense2 = layers.Dense(64, activation='relu')(dense1)
+    dense2 = layers.Dropout(0.3)(dense2)
+
+    classification_output = layers.Dense(1, activation='sigmoid',
+                                        name='classification')(dense2)
+
+    # ===== Abnormality Head =====
+    abnormality_output = layers.Dense(num_features, activation='sigmoid',
+                                     name='joint_abnormality')(attended_features)
+
+    model = Model(inputs=inputs,
+                  outputs=[classification_output, abnormality_output])
+
+    return model
+
+# Build model
+print("\n" + "="*60)
+print("BUILDING GRU-GCN MODEL")
+print("="*60)
+
+num_features = X_train.shape[1]
+model = build_gru_gcn_model(num_features=num_features)
+
+# Compile model
+model.compile(
+    optimizer=keras.optimizers.Adam(learning_rate=0.001),
+    loss={
+        'classification': 'binary_crossentropy',
+        'joint_abnormality': 'mse'
+    },
+    loss_weights={
+        'classification': 1.0,
+        'joint_abnormality': 0.3
+    },
+    metrics={
+        'classification': ['accuracy', keras.metrics.AUC()]
+    }
+)
+
+print(model.summary())
+
+# ============================================================
+# TRAIN MODEL
+# ============================================================
+print("\n" + "="*60)
+print("TRAINING GRU-GCN MODEL")
+print("="*60)
+
+history = model.fit(
+    X_train,
+    {'classification': y_train, 'joint_abnormality': X_train},
+    validation_data=(
+        X_val,
+        {'classification': y_val, 'joint_abnormality': X_val}
+    ),
+    epochs=20,
+    batch_size=128,
+    verbose=1,
+    callbacks=[
+        keras.callbacks.EarlyStopping(
+            monitor='val_classification_loss',
+            patience=3,
+            restore_best_weights=True,
+            mode='min'
+        ),
+        keras.callbacks.ReduceLROnPlateau(
+            monitor='val_classification_loss',
+            factor=0.5,
+            patience=2,
+            min_lr=1e-6,
+            mode='min'
+        )
+    ]
+)
+
+print("\n✓ Training complete!")
+
+# ============================================================
+# EVALUATE MODEL
+# ============================================================
+print("\n" + "="*60)
+print("MODEL EVALUATION ON TEST SET")
+print("="*60)
+
+y_pred_prob, joint_abnormality_pred = model.predict(X_test)
+y_pred = (y_pred_prob > 0.5).astype(int).flatten()
+
+print("\nClassification Report:")
+print(classification_report(y_test, y_pred, target_names=['Healthy', 'Stroke']))
+
+roc_auc = roc_auc_score(y_test, y_pred_prob)
+print(f"\nROC-AUC Score: {roc_auc:.4f}")
+
+print("\nConfusion Matrix:")
+cm = confusion_matrix(y_test, y_pred)
+print(cm)
+
+# ============================================================
+# VISUALIZE RESULTS
+# ============================================================
+print("\n" + "="*60)
+print("VISUALIZING RESULTS")
+print("="*60)
+
+fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+
+# Plot 1: Classification Loss
+axes[0, 0].plot(history.history['classification_loss'], label='Train Loss', linewidth=2)
+axes[0, 0].plot(history.history['val_classification_loss'], label='Val Loss', linewidth=2)
+axes[0, 0].set_title('Classification Loss', fontsize=12, fontweight='bold')
+axes[0, 0].set_xlabel('Epoch')
+axes[0, 0].set_ylabel('Loss')
+axes[0, 0].legend()
+axes[0, 0].grid()
+
+# Plot 2: Classification Accuracy
+axes[0, 1].plot(history.history['classification_accuracy'], label='Train Accuracy', linewidth=2)
+axes[0, 1].plot(history.history['val_classification_accuracy'], label='Val Accuracy', linewidth=2)
+axes[0, 1].set_title('Classification Accuracy', fontsize=12, fontweight='bold')
+axes[0, 1].set_xlabel('Epoch')
+axes[0, 1].set_ylabel('Accuracy')
+axes[0, 1].legend()
+axes[0, 1].grid()
+
+# Plot 3: Confusion Matrix
+from sklearn.metrics import ConfusionMatrixDisplay
+ConfusionMatrixDisplay(cm, display_labels=['Healthy', 'Stroke']).plot(ax=axes[1, 0])
+axes[1, 0].set_title('Confusion Matrix', fontsize=12, fontweight='bold')
+
+# Plot 4: ROC Curve
+fpr, tpr, _ = roc_curve(y_test, y_pred_prob)
+axes[1, 1].plot(fpr, tpr, label=f'ROC-AUC = {roc_auc:.4f}', linewidth=2)
+axes[1, 1].plot([0, 1], [0, 1], 'k--', label='Random Classifier')
+axes[1, 1].set_title('ROC Curve', fontsize=12, fontweight='bold')
+axes[1, 1].set_xlabel('False Positive Rate')
+axes[1, 1].set_ylabel('True Positive Rate')
+axes[1, 1].legend()
+axes[1, 1].grid()
+
+plt.tight_layout()
+plt.savefig('training_results.png', dpi=100, bbox_inches='tight')
+plt.show()
+
+print("✓ Saved: training_results.png")
+
+# Save model
+model.save('gru_gcn_gait_model.h5')
+print("✓ Saved: gru_gcn_gait_model.h5")
+
+print("\n" + "="*60)
+print("✓ GRU-GCN MODEL TRAINING COMPLETE!")
+print("="*60)
+print(f"\nSummary:")
+print(f"  Test Accuracy: {(y_pred == y_test).mean():.4f}")
+print(f"  ROC-AUC Score: {roc_auc:.4f}")
+print(f"  Healthy Sensitivity: {cm[0,0]/(cm[0,0]+cm[0,1]):.4f}")
+print(f"  Stroke Sensitivity: {cm[1,1]/(cm[1,0]+cm[1,1]):.4f}")
