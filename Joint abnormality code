@@ -1,0 +1,110 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import pickle
+
+# Don't reload - use the model from training directly
+# X_test, y_test, model are already in Colab memory
+
+print("="*60)
+print("JOINT-LEVEL ABNORMALITY ANALYSIS")
+print("="*60)
+
+# Load feature names
+with open('feature_names.pkl', 'rb') as f:
+    feature_names = pickle.load(f)
+
+print(f"Feature names: {feature_names}")
+
+# Get predictions (model is still in memory from training)
+y_pred_prob, joint_abnormality_pred = model.predict(X_test)
+
+# Separate predictions for healthy and stroke
+healthy_mask = (y_test == 0)
+stroke_mask = (y_test == 1)
+
+healthy_abnormality = joint_abnormality_pred[healthy_mask]
+stroke_abnormality = joint_abnormality_pred[stroke_mask]
+
+print(f"\nHealthy samples: {healthy_mask.sum()}")
+print(f"Stroke samples: {stroke_mask.sum()}")
+
+# Compute mean abnormality per joint
+healthy_mean = healthy_abnormality.mean(axis=0)
+stroke_mean = stroke_abnormality.mean(axis=0)
+
+# Create DataFrame for visualization
+abnormality_df = pd.DataFrame({
+    'Joint/Feature': feature_names,
+    'Healthy Mean Abnormality': healthy_mean,
+    'Stroke Mean Abnormality': stroke_mean,
+    'Difference': stroke_mean - healthy_mean
+})
+
+# Sort by difference (most abnormal joints in stroke)
+abnormality_df = abnormality_df.sort_values('Difference', ascending=False)
+
+print("\n" + "="*60)
+print("TOP 15 MOST ABNORMAL JOINTS/FEATURES IN STROKE PATIENTS")
+print("="*60)
+print(abnormality_df.head(15).to_string(index=False))
+
+# Visualize
+fig, axes = plt.subplots(2, 2, figsize=(16, 10))
+
+# Plot 1: Top 10 Most Abnormal Features
+top_10 = abnormality_df.head(10)
+axes[0, 0].barh(range(len(top_10)), top_10['Difference'], color='red', alpha=0.7)
+axes[0, 0].set_yticks(range(len(top_10)))
+axes[0, 0].set_yticklabels(top_10['Joint/Feature'])
+axes[0, 0].set_xlabel('Abnormality Difference (Stroke - Healthy)')
+axes[0, 0].set_title('Top 10 Most Abnormal Joints in Stroke', fontweight='bold', fontsize=12)
+axes[0, 0].grid(axis='x')
+
+# Plot 2: Healthy vs Stroke Abnormality (Top 15)
+top_15 = abnormality_df.head(15)
+x = np.arange(len(top_15))
+width = 0.35
+axes[0, 1].bar(x - width/2, top_15['Healthy Mean Abnormality'], width, label='Healthy', alpha=0.8, color='green')
+axes[0, 1].bar(x + width/2, top_15['Stroke Mean Abnormality'], width, label='Stroke', alpha=0.8, color='red')
+axes[0, 1].set_ylabel('Mean Abnormality Score')
+axes[0, 1].set_title('Abnormality Scores: Healthy vs Stroke (Top 15)', fontweight='bold', fontsize=12)
+axes[0, 1].set_xticks(x)
+axes[0, 1].set_xticklabels(top_15['Joint/Feature'], rotation=45, ha='right', fontsize=9)
+axes[0, 1].legend()
+axes[0, 1].grid(axis='y')
+
+# Plot 3: Distribution of abnormality scores for top 5 features
+top_5_features = abnormality_df.head(5)['Joint/Feature'].values
+for i, feat in enumerate(top_5_features):
+    feat_idx = feature_names.index(feat)
+    axes[1, 0].hist(healthy_abnormality[:, feat_idx], bins=50, alpha=0.5, label=f'Healthy - {feat}')
+    axes[1, 0].hist(stroke_abnormality[:, feat_idx], bins=50, alpha=0.5, label=f'Stroke - {feat}')
+
+axes[1, 0].set_xlabel('Abnormality Score')
+axes[1, 0].set_ylabel('Frequency')
+axes[1, 0].set_title('Distribution of Abnormality Scores - Top 5 Features', fontweight='bold', fontsize=12)
+axes[1, 0].legend(fontsize=8)
+axes[1, 0].grid()
+
+# Plot 4: All features ranked by abnormality
+axes[1, 1].barh(range(len(abnormality_df)), abnormality_df['Difference'], color='steelblue', alpha=0.7)
+axes[1, 1].set_yticks(range(len(abnormality_df)))
+axes[1, 1].set_yticklabels(abnormality_df['Joint/Feature'], fontsize=8)
+axes[1, 1].set_xlabel('Abnormality Difference (Stroke - Healthy)')
+axes[1, 1].set_title('All Features - Ranked Abnormality', fontweight='bold', fontsize=12)
+axes[1, 1].grid(axis='x')
+
+plt.tight_layout()
+plt.savefig('joint_abnormality_analysis.png', dpi=100, bbox_inches='tight')
+plt.show()
+
+print("\n✓ Saved: joint_abnormality_analysis.png")
+
+# Save results to CSV
+abnormality_df.to_csv('joint_abnormality_scores.csv', index=False)
+print("✓ Saved: joint_abnormality_scores.csv")
+
+print("\n" + "="*60)
+print("✓ JOINT-LEVEL ABNORMALITY ANALYSIS COMPLETE!")
+print("="*60)
